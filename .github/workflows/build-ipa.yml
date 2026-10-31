@@ -1,0 +1,107 @@
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcode-select -p
+          node --version
+          pnpm --version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Clone pinned DSH checkout
+        env:
+          DSH: ${{ runner.temp }}/dsh
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/deepseek-ai/deepseek-harness "$DSH"
+          git -C "$DSH" checkout 7be5505b0be06009d74891c869063c9cf19a0df0
+          cd "$DSH"
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install phone-dsh plugin deps
+        run: npm ci --prefix plugins
+
+      - name: Verify pinned checkout
+        env:
+          DSH: ${{ runner.temp }}/dsh
+        run: PDSH_DSH_CHECKOUT="$DSH" node plugins/scripts/dsh-checkout.mjs --verify
+
+      - name: Build DSH web distribution
+        env:
+          DSH: ${{ runner.temp }}/dsh
+        run: bash scripts/ci/build-web-dist.sh --source "$DSH" --store "$RUNNER_TEMP/pnpm-store"
+
+      - name: Stage Worker bundle
+        env:
+          DSH: ${{ runner.temp }}/dsh
+        run: |
+          chmod +x examples/probe-app/scripts/copy-bundle-assets.sh
+          examples/probe-app/scripts/copy-bundle-assets.sh --checkout "$DSH" --force --without-python --without-jq
+
+      - name: Strip HealthKit and HomeKit entitlements
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import plistlib, pathlib
+          p = pathlib.Path('examples/probe-app/Config/PhoneDSHProbe.entitlements')
+          data = plistlib.loads(p.read_bytes())
+          removed = [k for k in ('com.apple.developer.healthkit', 'com.apple.developer.homekit') if data.pop(k, None)]
+          p.write_bytes(plistlib.dumps(data))
+          print('removed:', removed)
+          print('left:', sorted(data))
+          PY
+
+      - name: Build unsigned device app
+        run: |
+          set -euo pipefail
+          cd examples/probe-app
+          xcodegen generate
+          xcodebuild -scheme PhoneDSHProbe \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
+          echo "app: $APP"
+          rm -rf Payload phone-dsh.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry phone-dsh.ipa Payload
+          ls -lh phone-dsh.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone-dsh-ipa
+          path: phone-dsh.ipa
+          if-no-files-found: error
