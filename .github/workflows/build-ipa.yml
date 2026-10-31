@@ -2,13 +2,18 @@ name: build-ipa
 
 on:
   workflow_dispatch:
+    inputs:
+      keep_entitlements:
+        description: 'Keep HealthKit/HomeKit entitlements (only if your signing cert supports them)'
+        type: boolean
+        default: false
   push:
     branches: [main]
 
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,6 +39,24 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      - name: Install Rust toolchain for xz-shell
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          source "$HOME/.cargo/env"
+          rustc --version
+          cargo --version
+          rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Build xz-shell xcframework
+        run: |
+          set -euo pipefail
+          source "$HOME/.cargo/env"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          bash shell/build-apple.sh
+          ls -la shell/dist | sed -n '1,20p'
+          test -d shell/dist/PDSHShell.xcframework
+
       - name: Clone pinned DSH checkout
         env:
           DSH: ${{ runner.temp }}/dsh
@@ -58,14 +81,15 @@ jobs:
           DSH: ${{ runner.temp }}/dsh
         run: bash scripts/ci/build-web-dist.sh --source "$DSH" --store "$RUNNER_TEMP/pnpm-store"
 
-      - name: Stage Worker bundle
+      - name: Stage Worker bundle (full: python3 and jq included)
         env:
           DSH: ${{ runner.temp }}/dsh
         run: |
           chmod +x examples/probe-app/scripts/copy-bundle-assets.sh
-          examples/probe-app/scripts/copy-bundle-assets.sh --checkout "$DSH" --force --without-python --without-jq
+          examples/probe-app/scripts/copy-bundle-assets.sh --checkout "$DSH" --force
 
-      - name: Strip HealthKit and HomeKit entitlements
+      - name: Check entitlements
+        if: ${{ inputs.keep_entitlements != true }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -78,9 +102,13 @@ jobs:
           print('left:', sorted(data))
           PY
 
-      - name: Build unsigned device app
+      - name: Build unsigned device app (xz-shell linked)
+        env:
+          PDSH_WITH_XZSHELL: '1'
         run: |
           set -euo pipefail
+          source "$HOME/.cargo/env"
+          export PATH="$HOME/.cargo/bin:$PATH"
           cd examples/probe-app
           xcodegen generate
           xcodebuild -scheme PhoneDSHProbe \
@@ -95,14 +123,15 @@ jobs:
           set -euo pipefail
           APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' | head -1)
           echo "app: $APP"
-          rm -rf Payload phone-dsh.ipa
+          rm -rf Payload phone-dsh-full.ipa
           mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -qry phone-dsh.ipa Payload
-          ls -lh phone-dsh.ipa
+          zip -qry phone-dsh-full.ipa Payload
+          ls -lh phone-dsh-full.ipa
+          du -sh Payload
 
       - uses: actions/upload-artifact@v4
         with:
-          name: phone-dsh-ipa
-          path: phone-dsh.ipa
+          name: phone-dsh-full-ipa
+          path: phone-dsh-full.ipa
           if-no-files-found: error
