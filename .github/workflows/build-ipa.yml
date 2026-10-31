@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild -version
+          xcodebuild -showsdks | sed -n '1,20p'
           xcode-select -p
           node --version
           pnpm --version
