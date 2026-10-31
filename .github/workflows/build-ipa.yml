@@ -81,7 +81,7 @@ jobs:
           DSH: ${{ runner.temp }}/dsh
         run: bash scripts/ci/build-web-dist.sh --source "$DSH" --store "$RUNNER_TEMP/pnpm-store"
 
-      - name: Stage Worker bundle (full: python3 and jq included)
+      - name: Stage Worker bundle with python3 and jq
         env:
           DSH: ${{ runner.temp }}/dsh
         run: |
